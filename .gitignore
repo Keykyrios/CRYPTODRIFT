@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Data (generated at runtime)
+data/*.db
+data/snapshots/*.npz
+data/results/
+
+# Model cache
+*.bin
+*.safetensors
+*.gguf
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/

@@ -40,3 +40,12 @@ data/results/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local package installs
+.local_packages/
+
+# Runtime data
+data/experiment.log
+
+# Chat exports (not documentation)
+*.md.bak

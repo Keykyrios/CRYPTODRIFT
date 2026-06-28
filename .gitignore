@@ -25,9 +25,7 @@ env/
 Thumbs.db
 desktop.ini
 
-# Data (generated at runtime)
-data/*.db
-data/snapshots/*.npz
+# Data (keep results, exclude scratch)
 data/results/
 
 # Model cache

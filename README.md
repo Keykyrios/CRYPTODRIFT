@@ -22,7 +22,7 @@ It answers a question nobody has asked: **what happens inside the model's attent
 
 | Prior Work | What It Shows | What It Misses |
 |---|---|---|
-| [Degradation Paper]([arXiv:2506.11022](https://arxiv.org/abs/2506.11022) | Vulnerabilities increase 37.6% after 5 iterations | No mechanistic explanation |
+| [Degradation Paper (arXiv:2506.11022)](https://arxiv.org/abs/2506.11022) | Vulnerabilities increase 37.6% after 5 iterations | No mechanistic explanation |
 | [MCP Paper (arXiv:2601.17549)](https://arxiv.org/abs/2601.17549) | Protocol has no origin authentication | No intersection with code security |
 | **CryptoDrift** | **Correlates attention-level patterns with crypto vulnerability introduction** | — |
 

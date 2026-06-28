@@ -34,7 +34,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Model constants — verified against Llama 3.1 8B config
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
+MODEL_ID = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"  # Pre-quantized, ~5GB download
 NUM_LAYERS = 32
 NUM_QUERY_HEADS = 32
 NUM_KV_HEADS = 8
@@ -64,31 +64,24 @@ def get_model_and_tokenizer(
     from transformers import (
         AutoModelForCausalLM,
         AutoTokenizer,
-        BitsAndBytesConfig,
     )
 
     logger.info("Loading model: %s", model_id)
     logger.info("This may take 1-2 minutes on first load...")
 
-    # 4-bit quantization config — verified against HuggingFace docs
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,  # Extra memory savings
-    )
-
     if max_memory is None:
-        max_memory = {0: "5.5GiB"}
+        max_memory = {0: "5.8GiB", "cpu": "16GiB"}
 
-    # Load model with eager attention (REQUIRED for attention weights)
+    # Pre-quantized model — no BitsAndBytesConfig needed, already 4-bit on disk
+    # low_cpu_mem_usage: loads weight-by-weight to minimize RAM spike
+    # offload_folder: spills excess layers to D: drive if needed
     _model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        quantization_config=bnb_config,
         device_map="auto",
         max_memory=max_memory,
         attn_implementation="eager",  # NOT flash_attention_2!
-        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        offload_folder=r"D:\offload",
     )
 
     # Load tokenizer
@@ -141,7 +134,7 @@ def get_vram_usage() -> dict:
                 torch.cuda.max_memory_allocated() / 1024 / 1024
             ),
             "total_mb": (
-                torch.cuda.get_device_properties(0).total_mem / 1024 / 1024
+                torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
             ),
         }
     except Exception as e:
@@ -228,18 +221,88 @@ def extract_code_from_response(response: str) -> str:
     """
     Extract Python code from a model response.
 
-    Handles ```python ... ``` blocks and bare code.
+    Handles:
+    - ```python ... ``` blocks (with or without newlines after fence)
+    - ``` ... ``` blocks (no language tag)
+    - Bare code with prose before/after
+    - Multiple code blocks (picks longest)
     """
-    # Try to extract from markdown code blocks
     import re
+    import ast
 
-    # Match ```python ... ``` or ``` ... ```
-    pattern = r"```(?:python)?\s*\n(.*?)```"
-    matches = re.findall(pattern, response, re.DOTALL)
+    if not response or not response.strip():
+        return ""
 
-    if matches:
-        # Return the longest match (most likely the full code)
-        return max(matches, key=len).strip()
+    # 1. Try to extract from markdown code blocks
+    #    Match ```python ... ``` or ``` ... ``` with flexible whitespace
+    patterns = [
+        r"```python\s*\n(.*?)```",       # ```python\ncode```
+        r"```python(.*?)```",             # ```python code``` (no newline)
+        r"```\s*\n(.*?)```",              # ```\ncode```
+    ]
 
-    # If no code blocks, return the whole response stripped
+    all_matches = []
+    for pattern in patterns:
+        matches = re.findall(pattern, response, re.DOTALL)
+        all_matches.extend(matches)
+
+    if all_matches:
+        # Pick the longest match that actually parses as Python
+        all_matches.sort(key=len, reverse=True)
+        for match in all_matches:
+            code = match.strip()
+            if not code:
+                continue
+            # Verify it's valid Python
+            try:
+                ast.parse(code)
+                return code
+            except SyntaxError:
+                continue
+        # None parsed — return longest anyway (detector will handle parse errors)
+        return all_matches[0].strip()
+
+    # 2. No code blocks found. Try to extract contiguous Python code
+    #    by finding lines that look like code (imports, defs, assignments)
+    lines = response.split("\n")
+    code_lines = []
+    in_code = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_code_line = (
+            stripped.startswith(("import ", "from ", "def ", "class ",
+                                "if ", "for ", "while ", "return ",
+                                "try:", "except", "with ", "    ",
+                                "#", "@"))
+            or stripped == ""  # blank lines within code
+            or (in_code and stripped and not stripped[0].isupper()
+                and "." not in stripped[:3])  # continuation
+        )
+
+        if is_code_line and (stripped.startswith(("import ", "from ", "def "))
+                             or in_code):
+            in_code = True
+            code_lines.append(line)
+        elif in_code and not stripped:
+            code_lines.append(line)  # keep blank lines in code
+        elif in_code and not is_code_line:
+            # Check if we've collected enough code
+            if len(code_lines) >= 3:
+                break
+            # Maybe prose interruption, keep trying
+            in_code = False
+            code_lines.clear()
+
+    if len(code_lines) >= 3:
+        code = "\n".join(code_lines).strip()
+        try:
+            ast.parse(code)
+            return code
+        except SyntaxError:
+            pass
+
+    # 3. Last resort: return the whole thing stripped of obvious prose
+    #    (the detector will report parse_error if it's not valid Python)
     return response.strip()
+

@@ -157,7 +157,7 @@ class ExperimentRunner:
         )
 
         logger.info(
-            "Session %s: %s × %s (%d iterations)",
+            "Session %s: %s x %s (%d iterations)",
             session.session_id[:8],
             sample.name,
             strategy_code,
@@ -208,16 +208,28 @@ class ExperimentRunner:
 
             # Extract code from response
             from ..attention.model_loader import extract_code_from_response
+            import ast as _ast
             refined_code = extract_code_from_response(generated_text)
 
             if not refined_code.strip():
                 logger.warning("Empty refinement at iteration %d, using previous", iter_num)
                 refined_code = current_code
+            else:
+                # Validate it's actually parseable Python
+                try:
+                    _ast.parse(refined_code)
+                except SyntaxError as parse_err:
+                    logger.warning(
+                        "Iteration %d: extracted code has syntax error (%s), "
+                        "using previous code",
+                        iter_num, parse_err.msg,
+                    )
+                    refined_code = current_code
 
             iter_duration = time.time() - iter_start
 
             # Vulnerability analysis
-            vuln_report = self._detector.analyze(refined_code)
+            vuln_report = self._detector.analyze(refined_code, baseline=current_code)
             vuln_delta = self._detector.compare(current_code, refined_code)
 
             # Complexity analysis
@@ -348,6 +360,10 @@ class ExperimentRunner:
                 "role": "assistant",
                 "content": generated_text,
             })
+            # Trim to last 2 exchanges (4 messages) to prevent
+            # unbounded context growth that kills perf on low-VRAM GPUs
+            if len(conversation_history) > 4:
+                conversation_history = conversation_history[-4:]
             current_code = refined_code
 
         # Complete session
@@ -415,8 +431,18 @@ class ExperimentRunner:
         for sample in samples:
             for strategy in self.config.strategies:
                 session_num += 1
+
+                # Resume: skip already-completed sessions
+                if self._db.is_session_completed(sample.name, strategy):
+                    logger.info(
+                        "=== Session %d/%d: %s x %s === SKIPPED (already completed)",
+                        session_num, total_sessions,
+                        sample.name, strategy,
+                    )
+                    continue
+
                 logger.info(
-                    "=== Session %d/%d: %s × %s ===",
+                    "=== Session %d/%d: %s x %s ===",
                     session_num, total_sessions,
                     sample.name, strategy,
                 )
@@ -426,7 +452,7 @@ class ExperimentRunner:
                     results.append(session)
                 except Exception as e:
                     logger.error(
-                        "Session failed: %s × %s: %s",
+                        "Session failed: %s x %s: %s",
                         sample.name, strategy, e,
                     )
 

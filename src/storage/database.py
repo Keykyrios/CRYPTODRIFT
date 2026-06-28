@@ -183,6 +183,16 @@ class CryptoDriftDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def is_session_completed(self, corpus_sample: str, strategy: str) -> bool:
+        """Check if a completed session exists for this sample+strategy pair."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE corpus_sample = ? AND strategy = ? AND status = 'completed'",
+            (corpus_sample, strategy),
+        ).fetchone()
+        return row[0] > 0
+
     # ── Iteration Operations ──────────────────────────────────────
 
     def insert_iteration(

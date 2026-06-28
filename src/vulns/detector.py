@@ -21,6 +21,7 @@ from .rules.hardcoded_key import HardcodedKeyRule
 from .rules.predictable_rng import PredictableRNGRule
 from .rules.mac_order import MACOrderRule
 from .rules.weak_hash import WeakHashRule
+from .rules.regex_rules import RegexVulnScanner
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,15 @@ class CryptoVulnDetector:
             MACOrderRule(),
             WeakHashRule(),
         ]
+        self._regex_scanner = RegexVulnScanner()
 
-    def analyze(self, code: str) -> VulnReport:
+    def analyze(self, code: str, baseline: str = "") -> VulnReport:
         """
         Analyze code for cryptographic vulnerabilities.
 
         Args:
             code: Python source code string.
+            baseline: Original code to diff against (for regex scanner).
 
         Returns:
             VulnReport with all findings.
@@ -124,19 +127,31 @@ class CryptoVulnDetector:
             tree = ast.parse(code)
         except SyntaxError as e:
             report.parse_error = f"SyntaxError: {e}"
+            # AST rules can't run, but regex scanner still can
             logger.warning("Failed to parse code: %s", e)
-            return report
 
-        # Run each rule
-        for rule in self._rules:
-            rule.reset()
-            try:
-                rule.visit(tree)
-                report.findings.extend(rule.findings)
-            except Exception as e:
-                logger.warning(
-                    "Rule %s failed: %s", rule.rule_id, e
-                )
+        # Run AST rules (only if parsing succeeded)
+        if report.parse_error is None:
+            for rule in self._rules:
+                rule.reset()
+                try:
+                    rule.visit(tree)
+                    report.findings.extend(rule.findings)
+                except Exception as e:
+                    logger.warning(
+                        "Rule %s failed: %s", rule.rule_id, e
+                    )
+
+        # Always run regex scanner as supplement
+        # It catches patterns AST rules miss (DES, RC4, hardcoded keys
+        # in unparseable code, timing vulns via ==, etc.)
+        regex_findings = self._regex_scanner.scan(code, baseline)
+
+        # Deduplicate: don't add regex findings if AST already caught same type+line
+        existing = {(f.vuln_type, f.line) for f in report.findings}
+        for rf in regex_findings:
+            if (rf.vuln_type, rf.line) not in existing:
+                report.findings.append(rf)
 
         return report
 

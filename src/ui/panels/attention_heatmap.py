@@ -139,7 +139,6 @@ class AttentionHeatmapPanel(QWidget):
             entropy_matrix: Shape (32, 32) normalized entropy values.
         """
         if entropy_matrix.shape != (32, 32):
-            # Pad or crop to 32×32
             padded = np.zeros((32, 32), dtype=np.float32)
             h = min(entropy_matrix.shape[0], 32)
             w = min(entropy_matrix.shape[1], 32)
@@ -148,6 +147,19 @@ class AttentionHeatmapPanel(QWidget):
 
         self._data = entropy_matrix.astype(np.float32)
         self.img_item.setImage(self._data)
+
+        # Auto-scale levels to actual data range
+        dmin = float(np.min(self._data))
+        dmax = float(np.max(self._data))
+        if dmax - dmin < 0.001:
+            # Uniform data — center around value
+            dmin = dmin - 0.1
+            dmax = dmax + 0.1
+        else:
+            pad = (dmax - dmin) * 0.1
+            dmin -= pad
+            dmax += pad
+        self.img_item.setLevels([dmin, dmax])
 
         # Update stats
         mean_e = float(np.mean(self._data))

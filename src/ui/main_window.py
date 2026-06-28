@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import numpy as np
+
 from PyQt6.QtWidgets import (
     QMainWindow,
     QSplitter,
@@ -41,6 +43,7 @@ from .panels.code_editor import CodeEditorPanel
 from .panels.attention_heatmap import AttentionHeatmapPanel
 from .panels.vuln_timeline import VulnTimelinePanel
 from .panels.drift_alerts import DriftAlertsPanel
+from .data_loader import ExperimentDataLoader, DriftAlertView
 from .theme import COLORS, get_font_ui
 
 logger = logging.getLogger(__name__)
@@ -65,14 +68,19 @@ class CryptoDriftMainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CryptoDrift — Mechanistic Crypto Degradation Analysis")
+        self.setWindowTitle("CryptoDrift \u2014 Mechanistic Crypto Degradation Analysis")
         self.setMinimumSize(1280, 720)
         self.resize(1600, 900)
+
+        self._data_loader = ExperimentDataLoader()
+        self._sessions = []
+        self._current_session = None
 
         self._setup_menubar()
         self._setup_toolbar()
         self._setup_panels()
         self._setup_statusbar()
+        self._load_all_sessions()
 
     def _setup_menubar(self) -> None:
         """Create the menu bar."""
@@ -125,35 +133,25 @@ class CryptoDriftMainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # Strategy selector
-        strategy_label = QLabel("  Strategy: ")
-        toolbar.addWidget(strategy_label)
+        # Session selector
+        session_label = QLabel("  Session: ")
+        toolbar.addWidget(session_label)
 
-        self.strategy_combo = QComboBox()
-        self.strategy_combo.addItems([
-            "EF — Efficiency",
-            "FF — Feature",
-            "SF — Security",
-            "AI — Ambiguous",
-        ])
-        self.strategy_combo.setMinimumWidth(160)
-        toolbar.addWidget(self.strategy_combo)
+        self.session_combo = QComboBox()
+        self.session_combo.setMinimumWidth(280)
+        self.session_combo.currentIndexChanged.connect(self._on_session_changed)
+        toolbar.addWidget(self.session_combo)
 
         toolbar.addSeparator()
 
-        # Iteration controls
-        self.btn_step = QPushButton("▶ Step")
-        self.btn_step.setToolTip("Run one iteration (F6)")
-        toolbar.addWidget(self.btn_step)
+        # Iteration selector
+        iter_label = QLabel("  Iteration: ")
+        toolbar.addWidget(iter_label)
 
-        self.btn_run_all = QPushButton("▶▶ Run All")
-        self.btn_run_all.setToolTip("Run all iterations (F5)")
-        toolbar.addWidget(self.btn_run_all)
-
-        self.btn_stop = QPushButton("■ Stop")
-        self.btn_stop.setToolTip("Stop current run")
-        self.btn_stop.setEnabled(False)
-        toolbar.addWidget(self.btn_stop)
+        self.iter_combo = QComboBox()
+        self.iter_combo.setMinimumWidth(80)
+        self.iter_combo.currentIndexChanged.connect(self._on_iteration_changed)
+        toolbar.addWidget(self.iter_combo)
 
         toolbar.addSeparator()
 
@@ -221,6 +219,114 @@ class CryptoDriftMainWindow(QMainWindow):
         # Iteration counter
         self.iter_label = QLabel("Iteration: 0/0")
         statusbar.addPermanentWidget(self.iter_label)
+
+    # ── Data Loading ───────────────────────────────────────────────
+
+    def _load_all_sessions(self) -> None:
+        """Load all sessions from the database."""
+        try:
+            self._sessions = self._data_loader.get_sessions()
+        except Exception as e:
+            logger.error("Failed to load sessions: %s", e)
+            self._sessions = []
+            return
+
+        self.session_combo.blockSignals(True)
+        self.session_combo.clear()
+        for s in self._sessions:
+            vuln_total = sum(it.vuln_count for it in s.iterations)
+            label = f"{s.corpus_sample} x {s.strategy}"
+            if vuln_total > 0:
+                label += f"  [{vuln_total} vulns]"
+            self.session_combo.addItem(label)
+        self.session_combo.blockSignals(False)
+
+        if self._sessions:
+            # Auto-select the session with most vulns
+            best = max(range(len(self._sessions)),
+                       key=lambda i: sum(it.vuln_count for it in self._sessions[i].iterations))
+            self.session_combo.setCurrentIndex(best)
+            self._on_session_changed(best)
+
+    def _on_session_changed(self, index: int) -> None:
+        """Handle session selection change."""
+        if index < 0 or index >= len(self._sessions):
+            return
+
+        self._current_session = self._sessions[index]
+        session = self._current_session
+
+        # Update iteration selector
+        self.iter_combo.blockSignals(True)
+        self.iter_combo.clear()
+        for it in session.iterations:
+            self.iter_combo.addItem(str(it.iteration_num))
+        self.iter_combo.blockSignals(False)
+
+        # Update session info
+        self.session_label.setText(
+            f"Session: {session.session_id[:8]}... | "
+            f"{session.corpus_sample} x {session.strategy}"
+        )
+
+        # Load full timeline for this session
+        self.timeline_panel.clear()
+        for it in session.iterations:
+            self.timeline_panel.add_point(
+                it.iteration_num, it.vuln_count, it.vuln_types
+            )
+
+        # Show last iteration by default
+        if session.iterations:
+            self.iter_combo.setCurrentIndex(len(session.iterations) - 1)
+            self._on_iteration_changed(len(session.iterations) - 1)
+
+        self.progress_bar.setMaximum(session.total_iterations)
+        self.progress_bar.setValue(len(session.iterations))
+        self.progress_bar.setFormat(
+            f"{len(session.iterations)}/{session.total_iterations} iterations"
+        )
+
+    def _on_iteration_changed(self, index: int) -> None:
+        """Handle iteration selection change."""
+        if (self._current_session is None
+                or index < 0
+                or index >= len(self._current_session.iterations)):
+            return
+
+        it = self._current_session.iterations[index]
+
+        # Update code panel
+        self.code_panel.set_code(it.code_after, it.iteration_num)
+
+        # Update heatmap
+        if it.entropy_matrix is not None and it.entropy_matrix.any():
+            self.heatmap_panel.update_data(it.entropy_matrix)
+        else:
+            # Use mean_entropy as a uniform fill so it's not blank
+            uniform = np.full((32, 32), it.mean_entropy, dtype=np.float32)
+            self.heatmap_panel.update_data(uniform)
+
+        # Update iteration label
+        self.iter_label.setText(
+            f"Iteration: {it.iteration_num} | "
+            f"Entropy: {it.mean_entropy:.4f} | "
+            f"Vulns: {it.vuln_count}"
+        )
+
+        # Add alerts for any vulns at this iteration
+        self.alerts_panel.clear()
+        import time as _time
+        for v in it.vulns:
+            alert = DriftAlertView(
+                timestamp=_time.time(),
+                severity=v.get("severity", "HIGH"),
+                layer=-1,
+                head=-1,
+                predicted_vuln_type=v.get("vuln_type", "UNKNOWN"),
+                message=v.get("description", "")[:120],
+            )
+            self.alerts_panel.add_alert(alert)
 
     # ── Public Update Methods ─────────────────────────────────────
 
